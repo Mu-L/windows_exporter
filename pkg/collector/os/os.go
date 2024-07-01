@@ -6,17 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/alecthomas/kingpin/v2"
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
+	"github.com/prometheus-community/windows_exporter/pkg/headers/kernel32"
 	"github.com/prometheus-community/windows_exporter/pkg/headers/netapi32"
 	"github.com/prometheus-community/windows_exporter/pkg/headers/psapi"
 	"github.com/prometheus-community/windows_exporter/pkg/headers/sysinfoapi"
 	"github.com/prometheus-community/windows_exporter/pkg/perflib"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
+
+	"github.com/alecthomas/kingpin/v2"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sys/windows/registry"
 )
@@ -196,16 +200,36 @@ func (c *collector) collect(ctx *types.ScrapeContext, ch chan<- prometheus.Metri
 	}
 
 	currentTime := time.Now()
-	timezoneName, _ := currentTime.Zone()
+
+	timeZoneInfo, err := kernel32.GetDynamicTimeZoneInformation()
+	if err != nil {
+		return err
+	}
+
+	// timeZoneKeyName contains the english name of the timezone.
+	timezoneName := syscall.UTF16ToString(timeZoneInfo.TimeZoneKeyName[:])
 
 	// Get total allocation of paging files across all disks.
 	memManKey, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management`, registry.QUERY_VALUE)
 	defer memManKey.Close()
-
 	if err != nil {
 		return err
 	}
+
 	pagingFiles, _, pagingErr := memManKey.GetStringsValue("ExistingPageFiles")
+
+	var fsipf float64
+	for _, pagingFile := range pagingFiles {
+		fileString := strings.ReplaceAll(pagingFile, `\??\`, "")
+		file, err := os.Stat(fileString)
+		// For unknown reasons, Windows doesn't always create a page file. Continue collection rather than aborting.
+		if err != nil {
+			_ = level.Debug(c.logger).Log("msg", fmt.Sprintf("Failed to read page file (reason: %s): %s\n", err, fileString))
+		} else {
+			fsipf += float64(file.Size())
+		}
+	}
+
 	// Get build number and product name from registry
 	ntKey, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
 	defer ntKey.Close()
@@ -229,18 +253,6 @@ func (c *collector) collect(ctx *types.ScrapeContext, ch chan<- prometheus.Metri
 		revision = 0
 	} else if err != nil {
 		return err
-	}
-
-	var fsipf float64
-	for _, pagingFile := range pagingFiles {
-		fileString := strings.ReplaceAll(pagingFile, `\??\`, "")
-		file, err := os.Stat(fileString)
-		// For unknown reasons, Windows doesn't always create a page file. Continue collection rather than aborting.
-		if err != nil {
-			_ = level.Debug(c.logger).Log("msg", fmt.Sprintf("Failed to read page file (reason: %s): %s\n", err, fileString))
-		} else {
-			fsipf += float64(file.Size())
-		}
 	}
 
 	gpi, err := psapi.GetPerformanceInfo()
@@ -269,12 +281,12 @@ func (c *collector) collect(ctx *types.ScrapeContext, ch chan<- prometheus.Metri
 		c.OSInformation,
 		prometheus.GaugeValue,
 		1.0,
-		fmt.Sprintf("Microsoft %s", pn), // Caption
+		"Microsoft "+pn, // Caption
 		fmt.Sprintf("%d.%d.%s", nwgi.VersionMajor, nwgi.VersionMinor, bn), // Version
-		fmt.Sprintf("%d", nwgi.VersionMajor),                              // Major Version
-		fmt.Sprintf("%d", nwgi.VersionMinor),                              // Minor Version
-		bn,                                                                // Build number
-		fmt.Sprintf("%d", revision),                                       // Revision
+		strconv.FormatUint(uint64(nwgi.VersionMajor), 10),                 // Major Version
+		strconv.FormatUint(uint64(nwgi.VersionMinor), 10),                 // Minor Version
+		bn,                               // Build number
+		strconv.FormatUint(revision, 10), // Revision
 	)
 
 	ch <- prometheus.MustNewConstMetric(

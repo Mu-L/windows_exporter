@@ -39,6 +39,9 @@ type collector struct {
 	TotalSentBytes           *prometheus.Desc
 	UDPPacketsReceivedPersec *prometheus.Desc
 	UDPPacketsSentPersec     *prometheus.Desc
+	FECRate                  *prometheus.Desc
+	LossRate                 *prometheus.Desc
+	RetransmissionRate       *prometheus.Desc
 
 	// gfx
 	AverageEncodingTime                         *prometheus.Desc
@@ -69,7 +72,7 @@ func (c *collector) SetLogger(logger log.Logger) {
 }
 
 func (c *collector) GetPerfCounter() ([]string, error) {
-	return []string{"RemoteFX Network"}, nil
+	return []string{"RemoteFX Network", "RemoteFX Graphics"}, nil
 }
 
 func (c *collector) Build() error {
@@ -131,6 +134,24 @@ func (c *collector) Build() error {
 	c.UDPPacketsSentPersec = prometheus.NewDesc(
 		prometheus.BuildFQName(types.Namespace, Name, "net_udp_packets_sent_total"),
 		"Rate in packets per second at which packets are sent over UDP.",
+		[]string{"session_name"},
+		nil,
+	)
+	c.FECRate = prometheus.NewDesc(
+		prometheus.BuildFQName(types.Namespace, Name, "net_fec_rate"),
+		"Forward Error Correction (FEC) percentage",
+		[]string{"session_name"},
+		nil,
+	)
+	c.LossRate = prometheus.NewDesc(
+		prometheus.BuildFQName(types.Namespace, Name, "net_loss_rate"),
+		"Loss percentage",
+		[]string{"session_name"},
+		nil,
+	)
+	c.RetransmissionRate = prometheus.NewDesc(
+		prometheus.BuildFQName(types.Namespace, Name, "net_retransmission_rate"),
+		"Percentage of packets that have been retransmitted",
 		[]string{"session_name"},
 		nil,
 	)
@@ -207,6 +228,9 @@ type perflibRemoteFxNetwork struct {
 	TotalSentBytes           float64 `perflib:"Total Sent Bytes"`
 	UDPPacketsReceivedPersec float64 `perflib:"UDP Packets Received/sec"`
 	UDPPacketsSentPersec     float64 `perflib:"UDP Packets Sent/sec"`
+	FECRate                  float64 `perflib:"Forward Error Correction (FEC) percentage"`
+	LossRate                 float64 `perflib:"Loss percentage"`
+	RetransmissionRate       float64 `perflib:"Percentage of packets that have been retransmitted"`
 }
 
 func (c *collector) collectRemoteFXNetworkCount(ctx *types.ScrapeContext, ch chan<- prometheus.Metric) error {
@@ -280,6 +304,26 @@ func (c *collector) collectRemoteFXNetworkCount(ctx *types.ScrapeContext, ch cha
 			c.UDPPacketsSentPersec,
 			prometheus.CounterValue,
 			d.UDPPacketsSentPersec,
+			d.Name,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.FECRate,
+			prometheus.GaugeValue,
+			d.FECRate,
+			d.Name,
+		)
+
+		ch <- prometheus.MustNewConstMetric(
+			c.LossRate,
+			prometheus.GaugeValue,
+			d.LossRate,
+			d.Name,
+		)
+
+		ch <- prometheus.MustNewConstMetric(
+			c.RetransmissionRate,
+			prometheus.GaugeValue,
+			d.RetransmissionRate,
 			d.Name,
 		)
 	}
